@@ -39,6 +39,7 @@ services:
 
   queue-worker:
     image: pvcm-app:latest
+    pull_policy: never
     command: php artisan queue:work --queue=campaign-data,default --tries=3 --backoff=3 --max-time=3600
     restart: unless-stopped
     environment:
@@ -66,6 +67,7 @@ services:
 
   scheduler:
     image: pvcm-app:latest
+    pull_policy: never
     command: sh -c "while true; do php artisan schedule:run --no-interaction; sleep 60; done"
     restart: unless-stopped
     environment:
@@ -94,7 +96,6 @@ services:
   mysql:
     image: mysql:8.4
     restart: unless-stopped
-    command: --default-authentication-plugin=mysql_native_password
     environment:
       MYSQL_DATABASE: ${DB_DATABASE:-pvcm}
       MYSQL_USER: ${DB_USERNAME:-pvcm}
@@ -120,6 +121,7 @@ services:
     volumes:
       - ./docker/monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - ./docker/monitoring/alert.rules.yml:/etc/prometheus/alert.rules.yml:ro
+      - ./docker/monitoring/bearer.token:/etc/prometheus/bearer.token:ro
       - prometheus_data:/prometheus
     depends_on:
       - nginx
@@ -137,6 +139,8 @@ services:
       GF_USERS_ALLOW_SIGN_UP: "false"
     volumes:
       - grafana_data:/var/lib/grafana
+      - ./docker/monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./docker/monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
     depends_on:
       - prometheus
     networks:

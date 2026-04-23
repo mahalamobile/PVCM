@@ -4,7 +4,7 @@ Production-grade Laravel API for managing personalized video campaigns with asyn
 
 ## Technology Stack
 
-- PHP 8.3
+- PHP 8.4
 - Laravel 13.x (compatible with 12+ requirement)
 - MySQL 8.4
 - Laravel Queues (database driver)
@@ -18,7 +18,9 @@ app/
   Actions/HandleCampaignDataChunk.php
   Console/Commands/GenerateCampaignAnalyticsCommand.php
   Http/
-    Controllers/Api/
+    Controllers/
+      Api/
+      MetricsController.php
     Middleware/EnsureBearerTokenMatches.php
     Requests/
     Resources/
@@ -164,7 +166,8 @@ Response: `202 Accepted`
   "campaign_id": 10,
   "received_records": 1,
   "chunk_size": 500,
-  "duplicate_strategy": "update"
+  "duplicate_strategy": "update",
+  "idempotency_key": "ingest-20260423-001"
 }
 ```
 
@@ -248,44 +251,78 @@ Outputs totals for campaigns, active campaigns, ingested videos, duplicates, and
 
 ### Prerequisites
 
-- Docker Desktop (engine running)
-- Optional: Doppler CLI (if using secret injection)
+- Docker engine available from your environment (Docker Desktop with WSL integration, or Docker Engine inside WSL)
+- Your Linux user in the `docker` group (or use `sudo docker ...`), so you can talk to `/var/run/docker.sock`
+- Optional: [Doppler](https://www.doppler.com/) CLI if you inject secrets that way
 
-### 1) Configure Environment
+### 1) Configure environment
 
 ```bash
 cp .env.example .env
 ```
 
-Set at minimum:
+Set at minimum in `.env` (same directory as `docker-compose.yml` — this is what Compose reads for `${VAR}` substitution):
 
-- `API_BEARER_TOKEN`
-- `DB_DATABASE`
-- `DB_USERNAME`
-- `DB_PASSWORD`
-- optional `CAMPAIGN_DUPLICATE_STRATEGY`
+- `API_BEARER_TOKEN` — non-empty string; required for `/api/*` and `/metrics`
+- `DB_DATABASE`, `DB_USERNAME`, `DB_PASSWORD` — must match what you want the MySQL container to create on first boot (defaults in `docker-compose.yml` are `pvcm` / `pvcm` / `secret`)
+- Optional: `CAMPAIGN_DUPLICATE_STRATEGY`, rate limits, etc.
 
-### 2) Build and Start
+`composer.lock` is committed so `docker compose build` installs pinned dependencies reproducibly.
+
+### 2) Build images and start the stack
+
+First build can take several minutes (PHP extensions, Composer vendor).
+
+```bash
+docker compose build app
+docker compose run --rm app php artisan key:generate
+docker compose up -d
+```
+
+Alternatively, in one step:
 
 ```bash
 docker compose up -d --build
 ```
 
-Services:
+On first start, MySQL 8.4 initializes the data directory, creates the database and application user, and the `app` container runs migrations when `RUN_MIGRATIONS_ON_STARTUP` is `true`.
 
-- API: `http://localhost:8080`
-- MySQL host port: `33061`
-- Queue worker and scheduler run as separate containers
-
-### 3) Verify
+If MySQL ever ends up in a bad half-initialized state (for example after an aborted first boot), reset the volume:
 
 ```bash
-curl http://localhost:8080/up
+docker compose down -v
+docker compose up -d
 ```
 
-Should return Laravel health response.
+### Services and ports
 
-### 4) Seed Demo Client
+| Service        | Notes |
+|----------------|--------|
+| API (via nginx) | http://localhost:8080 — always use port **8080** (not bare `http://localhost`) |
+| MySQL          | Host: `127.0.0.1`, port **33061** → container `3306` |
+| Queue worker   | `queue-worker` service — `campaign-data` + `default` queues |
+| Scheduler      | `scheduler` service — `schedule:run` every 60s |
+
+Query MySQL from the host without a local client:
+
+```bash
+docker compose exec mysql mysql -u pvcm -psecret pvcm -e "SHOW TABLES;"
+```
+
+### 3) Verify the app
+
+```bash
+curl -i http://localhost:8080/up
+```
+
+Expect `200 OK` and the Laravel health HTML (“Application up”).
+
+Interactive docs (use **:8080**; nginx uses relative redirects so the port is preserved):
+
+- Swagger UI: http://localhost:8080/docs
+- OpenAPI: http://localhost:8080/docs/openapi.yaml
+
+### 4) Seed demo client
 
 ```bash
 docker compose exec app php artisan db:seed
@@ -308,43 +345,70 @@ curl -X POST http://localhost:8080/api/campaigns \
 
 ## Monitoring with Prometheus + Grafana
 
-The stack includes an optional `monitoring` profile:
+The stack ships an optional `monitoring` profile: Prometheus scrapes the app’s `/metrics` endpoint, and Grafana is provisioned with a Prometheus datasource and the **PVCM Overview** dashboard (`docker/monitoring/grafana/`).
+
+### Start the monitoring stack
+
+Before the first `docker compose --profile monitoring up`, create the bearer token file so Prometheus can authenticate to `/metrics` (same value as `API_BEARER_TOKEN` in `.env`):
+
+```bash
+grep '^API_BEARER_TOKEN=' .env | cut -d= -f2- | tr -d '\n' > docker/monitoring/bearer.token
+chmod 644 docker/monitoring/bearer.token
+```
+
+Use `644` so the Prometheus process inside the container can read the file. The path `docker/monitoring/bearer.token` is gitignored.
+
+Start or update monitoring containers:
 
 ```bash
 docker compose --profile monitoring up -d
 ```
 
-- Prometheus: `http://localhost:9090`
-- Grafana: `http://localhost:3000`
+- Prometheus: http://localhost:9090 — **Status → Targets** should show job `pvcm_metrics` as **UP** (scrapes `http://nginx/metrics` with the bearer token file).
+- Grafana: http://localhost:3000 — default login `admin` / `admin` (change or skip in local dev).
+
+After changing `docker/monitoring/grafana/dashboards/*.json`, reload Grafana or restart the `grafana` service so provisioning picks up edits.
+
+### Example: Prometheus targets
+
+![Prometheus targets — pvcm_metrics scrape UP](docs/images/prometheus.png)
+
+### Example: Grafana PVCM Overview
+
+![Grafana — PVCM Overview dashboard](docs/images/grafana.png)
 
 ### Metrics Endpoint
 
-- `GET /metrics` (Prometheus text format, bearer-auth protected)
-- Current metrics:
-  - `pvcm_campaigns_total`
-  - `pvcm_campaign_data_total`
-  - `pvcm_campaign_duplicates_total`
-  - `pvcm_campaigns_active`
-  - `pvcm_jobs_pending`
-  - `pvcm_jobs_campaign_data_pending`
+`GET /metrics` (Prometheus text format, bearer-auth protected) exposes:
 
-### Prometheus Config
+| Metric | Type | Description |
+|---|---|---|
+| `pvcm_campaigns_total` | gauge | Total campaigns in the system |
+| `pvcm_campaigns_active` | gauge | Campaigns currently in their active window |
+| `pvcm_campaign_data_total` | gauge | Total personalized videos ingested |
+| `pvcm_campaign_duplicates_total` | counter | Total duplicate payloads seen |
+| `pvcm_jobs_pending` | gauge | Jobs waiting across all queues |
+| `pvcm_jobs_campaign_data_pending` | gauge | Jobs waiting in `campaign-data` queue |
+| `pvcm_campaign_data_by_campaign{campaign_id,campaign_name}` | gauge | Ingested videos per campaign |
 
-`docker/monitoring/prometheus.yml` includes:
-- `/up` scrape for app health
-- `/metrics` scrape for PVCM KPIs
+### Included dashboard panels
 
-Before running monitoring, set the bearer token in `prometheus.yml`:
+- **Service Up** - scrape health
+- **Total Campaigns / Active Campaigns / Videos Ingested / Duplicate Payloads** - headline stats
+- **Queue Depth** - total + `campaign-data` queue over time
+- **Ingestion Rate (videos/min)** - derivative of `pvcm_campaign_data_total`
+- **Campaigns Over Time** - total vs active
+- **Videos Per Campaign** - bar gauge sorted descending
+- **Videos Per Campaign (over time)** - stepped time series per `campaign_id`
 
-- replace `CHANGE_ME_WITH_API_BEARER_TOKEN`
+### Alert rules
 
-### Recommended Grafana Dashboards
+`docker/monitoring/alert.rules.yml` ships with two rules that Prometheus evaluates continuously:
 
-- API health and uptime (`up` query)
-- queue backlog trend (`pvcm_jobs_campaign_data_pending`)
-- duplicate rate (`increase(pvcm_campaign_duplicates_total[5m])`)
-- throughput (`increase(pvcm_campaign_data_total[5m])`)
-- active campaigns (`pvcm_campaigns_active`)
+- `PVCMDown` - scrape target down for 2+ minutes (critical)
+- `PVCMQueueBacklogHigh` - `pvcm_jobs_campaign_data_pending > 2000` for 5+ minutes (warning)
+
+Wire these to Alertmanager or Grafana alerting contact points to get notifications.
 
 ## Production Hardening Checklist
 
@@ -358,6 +422,7 @@ Before running monitoring, set the bearer token in `prometheus.yml`:
 
 ## Notes
 
-- Endpoint responses use proper HTTP codes (`201`, `202`, `401`, `422`).
+- Endpoint responses use proper HTTP codes (`201`, `202`, `401`, `422`, `429`; ingestion can return `400` for a missing idempotency header and `409` for idempotency key conflict).
 - Validation errors are returned in Laravel standard JSON format.
 - The ingestion endpoint is optimized with chunked jobs and bulk upsert patterns.
+- When you rotate `API_BEARER_TOKEN`, recreate `docker/monitoring/bearer.token` and restart Prometheus (`docker compose --profile monitoring restart prometheus`) so scraping keeps working.

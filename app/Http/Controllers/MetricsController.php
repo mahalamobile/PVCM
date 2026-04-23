@@ -41,8 +41,37 @@ class MetricsController extends Controller
             'pvcm_jobs_campaign_data_pending '.DB::table('jobs')->where('queue', 'campaign-data')->count(),
         ];
 
+        $perCampaign = DB::table('campaign_data as cd')
+            ->leftJoin('campaigns as c', 'c.id', '=', 'cd.campaign_id')
+            ->select('cd.campaign_id', 'c.name', DB::raw('count(*) as total'))
+            ->groupBy('cd.campaign_id', 'c.name')
+            ->get();
+
+        if ($perCampaign->isNotEmpty()) {
+            $metrics[] = '# HELP pvcm_campaign_data_by_campaign Ingested videos per campaign.';
+            $metrics[] = '# TYPE pvcm_campaign_data_by_campaign gauge';
+
+            foreach ($perCampaign as $row) {
+                $metrics[] = sprintf(
+                    'pvcm_campaign_data_by_campaign{campaign_id="%d",campaign_name="%s"} %d',
+                    (int) $row->campaign_id,
+                    $this->escapeLabel((string) ($row->name ?? '')),
+                    (int) $row->total,
+                );
+            }
+        }
+
         return response(implode("\n", $metrics)."\n", 200, [
             'Content-Type' => 'text/plain; version=0.0.4',
         ]);
+    }
+
+    private function escapeLabel(string $value): string
+    {
+        return str_replace(
+            ['\\', '"', "\n"],
+            ['\\\\', '\\"', '\\n'],
+            $value,
+        );
     }
 }

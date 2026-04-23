@@ -6,15 +6,10 @@ rule_files:
   - /etc/prometheus/alert.rules.yml
 
 scrape_configs:
-  - job_name: "pvcm_app_health"
-    metrics_path: /up
-    static_configs:
-      - targets: [ "nginx:80" ]
-
   - job_name: "pvcm_metrics"
     metrics_path: /metrics
     authorization:
       type: Bearer
-      credentials: CHANGE_ME_WITH_API_BEARER_TOKEN
+      credentials_file: /etc/prometheus/bearer.token
     static_configs:
       - targets: [ "nginx:80" ]

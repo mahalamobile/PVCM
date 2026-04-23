@@ -7,9 +7,10 @@ RUN composer install \
     --prefer-dist \
     --no-interaction \
     --no-progress \
-    --optimize-autoloader
+    --no-scripts \
+    --no-autoloader
 
-FROM php:8.3-fpm-alpine
+FROM php:8.4-fpm-alpine
 
 RUN apk add --no-cache \
     bash \
@@ -21,6 +22,8 @@ RUN apk add --no-cache \
     oniguruma-dev \
     && docker-php-ext-install pdo_mysql intl mbstring opcache zip
 
+COPY --from=composer:2 /usr/bin/composer /usr/bin/composer
+
 WORKDIR /var/www/html
 
 COPY --from=vendor /app/vendor ./vendor
@@ -28,6 +31,8 @@ COPY . .
 
 RUN cp .env.example .env \
     && mkdir -p storage/framework/cache storage/framework/sessions storage/framework/views storage/logs bootstrap/cache \
+    && composer dump-autoload --no-dev --optimize --classmap-authoritative \
+    && php artisan package:discover --ansi \
     && chown -R www-data:www-data /var/www/html \
     && chmod -R ug+rwx storage bootstrap/cache
 

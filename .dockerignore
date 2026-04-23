@@ -10,4 +10,5 @@ storage/framework/testing/*
 storage/framework/views/*
 .env
 .env.*
+!.env.example
 docker/monitoring/data
