@@ -1,0 +1,253 @@
+openapi: 3.0.3
+info:
+  title: Personalized Video Campaign Manager API
+  version: 1.0.0
+  description: API for creating campaigns and asynchronously ingesting personalized video records.
+servers:
+  - url: http://localhost:8080
+    description: Local Docker environment
+tags:
+  - name: Campaigns
+  - name: Health
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: API Key
+  schemas:
+    CampaignCreateRequest:
+      type: object
+      required: [client_id, name, start_date]
+      properties:
+        client_id:
+          type: integer
+          example: 1
+        name:
+          type: string
+          maxLength: 255
+          example: Spring Video Promo
+        start_date:
+          type: string
+          format: date-time
+          example: 2026-04-23T09:00:00Z
+        end_date:
+          type: string
+          format: date-time
+          nullable: true
+          example: 2026-05-30T23:59:59Z
+    CampaignResource:
+      type: object
+      properties:
+        data:
+          type: object
+          properties:
+            id: { type: integer, example: 10 }
+            client_id: { type: integer, example: 1 }
+            name: { type: string, example: Spring Video Promo }
+            start_date: { type: string, format: date-time }
+            end_date: { type: string, format: date-time, nullable: true }
+            created_at: { type: string, format: date-time }
+            updated_at: { type: string, format: date-time }
+    CampaignDataRow:
+      type: object
+      required: [user_id, video_url]
+      properties:
+        user_id:
+          type: string
+          example: user-1001
+        video_url:
+          type: string
+          format: uri
+          example: https://cdn.example.com/pv/user-1001.mp4
+        custom_fields:
+          type: object
+          additionalProperties: true
+          example:
+            first_name: Sam
+            segment: gold
+            region: ZA
+    CampaignDataRequestWrapped:
+      type: object
+      required: [data]
+      properties:
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/CampaignDataRow'
+    CampaignDataAcceptedResponse:
+      type: object
+      properties:
+        message:
+          type: string
+          example: Campaign data accepted for processing.
+        campaign_id:
+          type: integer
+          example: 10
+        received_records:
+          type: integer
+          example: 500
+        chunk_size:
+          type: integer
+          example: 500
+        duplicate_strategy:
+          type: string
+          enum: [update, reject, merge]
+          example: update
+    ValidationError:
+      type: object
+      properties:
+        message:
+          type: string
+          example: The given data was invalid.
+        errors:
+          type: object
+          additionalProperties:
+            type: array
+            items:
+              type: string
+    UnauthorizedError:
+      type: object
+      properties:
+        message:
+          type: string
+          example: Unauthorized.
+    ThrottleError:
+      type: object
+      properties:
+        message:
+          type: string
+          example: Rate limit exceeded for campaign data ingestion.
+    BadRequestError:
+      type: object
+      properties:
+        message:
+          type: string
+          example: Missing required header: Idempotency-Key.
+    ConflictError:
+      type: object
+      properties:
+        message:
+          type: string
+          example: Idempotency key conflict: this key was already used with a different payload.
+paths:
+  /api/campaigns:
+    post:
+      tags: [Campaigns]
+      summary: Create a new campaign
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CampaignCreateRequest'
+      responses:
+        '201':
+          description: Campaign created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CampaignResource'
+        '401':
+          description: Missing or invalid bearer token
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UnauthorizedError'
+        '422':
+          description: Validation error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ValidationError'
+        '429':
+          description: Rate limited
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ThrottleError'
+  /api/campaigns/{campaign_id}/data:
+    post:
+      tags: [Campaigns]
+      summary: Asynchronously ingest campaign user video data
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: campaign_id
+          required: true
+          schema:
+            type: integer
+          example: 10
+        - in: header
+          name: Idempotency-Key
+          required: true
+          schema:
+            type: string
+            maxLength: 255
+          description: Unique key for safely retrying the same ingestion request.
+          example: ingest-20260423-001
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              oneOf:
+                - $ref: '#/components/schemas/CampaignDataRequestWrapped'
+                - type: array
+                  items:
+                    $ref: '#/components/schemas/CampaignDataRow'
+      responses:
+        '202':
+          description: Accepted for asynchronous processing
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CampaignDataAcceptedResponse'
+        '401':
+          description: Missing or invalid bearer token
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UnauthorizedError'
+        '400':
+          description: Missing or invalid idempotency key
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BadRequestError'
+        '409':
+          description: Idempotency key reused with a different payload
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ConflictError'
+        '422':
+          description: Validation error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ValidationError'
+        '429':
+          description: Rate limited
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ThrottleError'
+  /api/health:
+    get:
+      tags: [Health]
+      summary: API health check
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Service healthy
+        '401':
+          description: Missing or invalid bearer token
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UnauthorizedError'

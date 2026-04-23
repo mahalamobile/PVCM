@@ -1,0 +1,20 @@
+groups:
+  - name: pvcm-alerts
+    rules:
+      - alert: PVCMDown
+        expr: up{job="pvcm_metrics"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Personalized Video Campaign Manager is down"
+          description: "Prometheus could not scrape PVCM metrics endpoint for more than 2 minutes."
+
+      - alert: PVCMQueueBacklogHigh
+        expr: pvcm_jobs_campaign_data_pending > 2000
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Campaign data queue backlog is high"
+          description: "campaign-data queue has been above 2000 jobs for over 5 minutes."

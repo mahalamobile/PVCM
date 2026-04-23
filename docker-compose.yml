@@ -1,0 +1,152 @@
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: pvcm-app:latest
+    environment:
+      APP_ENV: local
+      APP_DEBUG: "true"
+      APP_URL: http://localhost:8080
+      DB_CONNECTION: mysql
+      DB_HOST: mysql
+      DB_PORT: 3306
+      DB_DATABASE: ${DB_DATABASE:-pvcm}
+      DB_USERNAME: ${DB_USERNAME:-pvcm}
+      DB_PASSWORD: ${DB_PASSWORD:-secret}
+      QUEUE_CONNECTION: database
+      API_BEARER_TOKEN: ${API_BEARER_TOKEN:-}
+      CAMPAIGN_DUPLICATE_STRATEGY: ${CAMPAIGN_DUPLICATE_STRATEGY:-update}
+      CAMPAIGN_INGEST_CHUNK_SIZE: ${CAMPAIGN_INGEST_CHUNK_SIZE:-500}
+      RUN_MIGRATIONS_ON_STARTUP: ${RUN_MIGRATIONS_ON_STARTUP:-true}
+    depends_on:
+      mysql:
+        condition: service_healthy
+    networks:
+      - backend
+
+  nginx:
+    image: nginx:1.27-alpine
+    depends_on:
+      - app
+    ports:
+      - "8080:80"
+    volumes:
+      - ./:/var/www/html
+      - ./docker/nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
+    networks:
+      - backend
+
+  queue-worker:
+    image: pvcm-app:latest
+    command: php artisan queue:work --queue=campaign-data,default --tries=3 --backoff=3 --max-time=3600
+    restart: unless-stopped
+    environment:
+      APP_ENV: local
+      APP_DEBUG: "true"
+      APP_URL: http://localhost:8080
+      DB_CONNECTION: mysql
+      DB_HOST: mysql
+      DB_PORT: 3306
+      DB_DATABASE: ${DB_DATABASE:-pvcm}
+      DB_USERNAME: ${DB_USERNAME:-pvcm}
+      DB_PASSWORD: ${DB_PASSWORD:-secret}
+      QUEUE_CONNECTION: database
+      API_BEARER_TOKEN: ${API_BEARER_TOKEN:-}
+      CAMPAIGN_DUPLICATE_STRATEGY: ${CAMPAIGN_DUPLICATE_STRATEGY:-update}
+      CAMPAIGN_INGEST_CHUNK_SIZE: ${CAMPAIGN_INGEST_CHUNK_SIZE:-500}
+      RUN_MIGRATIONS_ON_STARTUP: "false"
+    depends_on:
+      mysql:
+        condition: service_healthy
+      app:
+        condition: service_started
+    networks:
+      - backend
+
+  scheduler:
+    image: pvcm-app:latest
+    command: sh -c "while true; do php artisan schedule:run --no-interaction; sleep 60; done"
+    restart: unless-stopped
+    environment:
+      APP_ENV: local
+      APP_DEBUG: "true"
+      APP_URL: http://localhost:8080
+      DB_CONNECTION: mysql
+      DB_HOST: mysql
+      DB_PORT: 3306
+      DB_DATABASE: ${DB_DATABASE:-pvcm}
+      DB_USERNAME: ${DB_USERNAME:-pvcm}
+      DB_PASSWORD: ${DB_PASSWORD:-secret}
+      QUEUE_CONNECTION: database
+      API_BEARER_TOKEN: ${API_BEARER_TOKEN:-}
+      CAMPAIGN_DUPLICATE_STRATEGY: ${CAMPAIGN_DUPLICATE_STRATEGY:-update}
+      CAMPAIGN_INGEST_CHUNK_SIZE: ${CAMPAIGN_INGEST_CHUNK_SIZE:-500}
+      RUN_MIGRATIONS_ON_STARTUP: "false"
+    depends_on:
+      mysql:
+        condition: service_healthy
+      app:
+        condition: service_started
+    networks:
+      - backend
+
+  mysql:
+    image: mysql:8.4
+    restart: unless-stopped
+    command: --default-authentication-plugin=mysql_native_password
+    environment:
+      MYSQL_DATABASE: ${DB_DATABASE:-pvcm}
+      MYSQL_USER: ${DB_USERNAME:-pvcm}
+      MYSQL_PASSWORD: ${DB_PASSWORD:-secret}
+      MYSQL_ROOT_PASSWORD: ${DB_ROOT_PASSWORD:-root}
+    ports:
+      - "33061:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+    healthcheck:
+      test: [ "CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-uroot", "-p${DB_ROOT_PASSWORD:-root}" ]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks:
+      - backend
+
+  prometheus:
+    image: prom/prometheus:v2.54.1
+    profiles: [ "monitoring" ]
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./docker/monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./docker/monitoring/alert.rules.yml:/etc/prometheus/alert.rules.yml:ro
+      - prometheus_data:/prometheus
+    depends_on:
+      - nginx
+    networks:
+      - backend
+
+  grafana:
+    image: grafana/grafana:11.2.2
+    profiles: [ "monitoring" ]
+    ports:
+      - "3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - grafana_data:/var/lib/grafana
+    depends_on:
+      - prometheus
+    networks:
+      - backend
+
+volumes:
+  mysql_data:
+  prometheus_data:
+  grafana_data:
+
+networks:
+  backend:
+    driver: bridge
